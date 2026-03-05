@@ -35,8 +35,7 @@ jobs:
           sudo apt-get install -y jq python3-pip
           pip3 install pynacl
 
-      - name: Derive app_slug and env name
-        id: derive
+      - name: Derive app_slug and EB env name
         run: |
           set -euo pipefail
 
@@ -55,8 +54,7 @@ jobs:
           echo "APP_SLUG=$APP_SLUG" >> $GITHUB_ENV
           echo "EB_ENV_NAME=$EB_ENV_NAME" >> $GITHUB_ENV
 
-      - name: Find EB environment and its EC2 instance id
-        id: eb
+      - name: Find EB EC2 instance id
         run: |
           set -euo pipefail
 
@@ -67,14 +65,12 @@ jobs:
 
           if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" = "null" ]; then
             echo "ERROR: Could not find an EC2 instance for EB env: ${EB_ENV_NAME}"
-            echo "Make sure the EB environment exists and has at least 1 instance."
             exit 1
           fi
 
           echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_ENV
 
-      - name: Run DB provisioning via SSM on the EB instance
-        id: ssm
+      - name: Provision DB + user via SSM on EB instance
         env:
           RDS_HOST: ${{ secrets.RDS_HOST }}
           RDS_ADMIN_USER: ${{ secrets.RDS_ADMIN_USER }}
@@ -83,7 +79,7 @@ jobs:
           set -euo pipefail
 
           if [ -z "${RDS_HOST}" ] || [ -z "${RDS_ADMIN_USER}" ] || [ -z "${RDS_ADMIN_PASSWORD}" ]; then
-            echo "ERROR: Missing required secrets in platform-infra repo: RDS_HOST, RDS_ADMIN_USER, RDS_ADMIN_PASSWORD"
+            echo "ERROR: Missing required secrets (RDS_HOST, RDS_ADMIN_USER, RDS_ADMIN_PASSWORD)"
             exit 1
           fi
 
@@ -91,7 +87,6 @@ jobs:
           DB_USER="${APP_SLUG}_app"
           DB_PASS="$(openssl rand -base64 48 | tr -d '\n' | tr '+/' '-_' | cut -c1-32)"
 
-          # Build the remote script and substitute values BEFORE sending to SSM
           REMOTE_CMD="$(cat <<EOF
 set -euo pipefail
 
@@ -108,7 +103,6 @@ psql -h '${RDS_HOST}' -U '${RDS_ADMIN_USER}' -d postgres -tAc "SELECT 1 FROM pg_
   || psql -h '${RDS_HOST}' -U '${RDS_ADMIN_USER}' -d postgres -c "CREATE USER \\"${DB_USER}\\";"
 
 psql -h '${RDS_HOST}' -U '${RDS_ADMIN_USER}' -d postgres -c "ALTER USER \\"${DB_USER}\\" WITH PASSWORD '${DB_PASS}';"
-
 psql -h '${RDS_HOST}' -U '${RDS_ADMIN_USER}' -d postgres -c "GRANT ALL PRIVILEGES ON DATABASE \\"${DB_NAME}\\" TO \\"${DB_USER}\\";"
 
 export PGPASSWORD='${DB_PASS}'
@@ -119,8 +113,7 @@ EOF
           COMMAND_ID="$(aws ssm send-command \
             --instance-ids "${INSTANCE_ID}" \
             --document-name "AWS-RunShellScript" \
-            --comment "Provision DB/user for ${APP_SLUG}" \
-            --parameters commands="$(jq -n --arg cmd "$REMOTE_CMD" '{commands:[$cmd]}')" \
+            --parameters "$(jq -n --arg cmd "$REMOTE_CMD" '{commands:[$cmd]}')" \
             --query "Command.CommandId" \
             --output text)"
 
@@ -143,9 +136,9 @@ EOF
           echo "::add-mask::${DB_PASS}"
           echo "::add-mask::${DATABASE_URL}"
 
-          echo "DATABASE_URL=${DATABASE_URL}" >> $GITHUB_ENV
+          echo "DATABASE_URL=$DATABASE_URL" >> $GITHUB_ENV
 
-      - name: Write DATABASE_URL secret to target repo (GitHub API)
+      - name: Write DATABASE_URL secret to target repo
         env:
           GH_ADMIN_TOKEN: ${{ secrets.GH_ADMIN_TOKEN }}
         run: |
@@ -167,24 +160,12 @@ EOF
           PUBLIC_KEY="$(echo "$KEY_JSON" | jq -r .key)"
 
           if [ -z "$KEY_ID" ] || [ "$KEY_ID" = "null" ]; then
-            echo "ERROR: Could not fetch public key for repo secrets. Check GH_ADMIN_TOKEN permissions."
+            echo "ERROR: Could not fetch public key for repo secrets."
             echo "$KEY_JSON"
             exit 1
           fi
 
-          python3 - <<'PY'
-import base64, os
-from nacl import encoding, public
-
-pk_b64 = os.environ["PUBLIC_KEY"]
-secret_value = os.environ["SECRET_VALUE"].encode("utf-8")
-
-pk = public.PublicKey(pk_b64, encoding.Base64Encoder())
-sealed_box = public.SealedBox(pk)
-encrypted = sealed_box.encrypt(secret_value)
-print(base64.b64encode(encrypted).decode("utf-8"))
-PY
-          ENCRYPTED_VALUE="$(python3 - <<'PY'
+          ENCRYPTED_VALUE="$(PUBLIC_KEY="$PUBLIC_KEY" SECRET_VALUE="$DATABASE_URL" python3 - <<'PY'
 import base64, os
 from nacl import encoding, public
 
@@ -203,7 +184,3 @@ PY
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${OWNER}/${REPO}/actions/secrets/DATABASE_URL" \
             -d "$(jq -n --arg key_id "$KEY_ID" --arg encrypted_value "$ENCRYPTED_VALUE" '{key_id:$key_id, encrypted_value:$encrypted_value}')"
-
-        env:
-          PUBLIC_KEY: ${{ env.PUBLIC_KEY }}
-          SECRET_VALUE: ${{ env.DATABASE_URL }}
