@@ -31,8 +31,7 @@ jobs:
       - name: Install tooling
         run: |
           sudo apt-get update
-          sudo apt-get install -y jq python3-pip
-          pip3 install pynacl
+          sudo apt-get install -y jq
 
       - name: Derive app_slug and EB env name
         shell: bash
@@ -66,7 +65,6 @@ jobs:
           echo "INSTANCE_ID=$INSTANCE_ID" >> "$GITHUB_ENV"
 
       - name: Provision DB via SSM (script)
-        id: db
         shell: bash
         env:
           INSTANCE_ID: ${{ env.INSTANCE_ID }}
@@ -81,47 +79,16 @@ jobs:
           echo "::add-mask::${DATABASE_URL}"
           echo "DATABASE_URL=${DATABASE_URL}" >> "$GITHUB_ENV"
 
-      - name: Write DATABASE_URL secret to target repo
+      - name: Write DATABASE_URL secret to target repo (gh cli)
         shell: bash
         env:
-          GH_ADMIN_TOKEN: ${{ secrets.GH_ADMIN_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_ADMIN_TOKEN }}
         run: |
           set -euo pipefail
-
-          if [ -z "${GH_ADMIN_TOKEN}" ]; then
+          if [ -z "${GH_TOKEN}" ]; then
             echo "ERROR: Missing GH_ADMIN_TOKEN secret in platform-infra repo."
             exit 1
           fi
 
-          OWNER="${TARGET_REPO%/*}"
-          REPO="${TARGET_REPO#*/}"
-
-          KEY_JSON="$(curl -sS -H "Authorization: Bearer ${GH_ADMIN_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${OWNER}/${REPO}/actions/secrets/public-key")"
-
-          KEY_ID="$(echo "$KEY_JSON" | jq -r .key_id)"
-          PUBLIC_KEY="$(echo "$KEY_JSON" | jq -r .key)"
-
-          if [ -z "$KEY_ID" ] || [ "$KEY_ID" = "null" ] || [ -z "$PUBLIC_KEY" ] || [ "$PUBLIC_KEY" = "null" ]; then
-            echo "ERROR: Could not fetch public key for repo secrets. Check GH_ADMIN_TOKEN permissions."
-            echo "$KEY_JSON"
-            exit 1
-          fi
-
-          ENCRYPTED_VALUE="$(PUBLIC_KEY="$PUBLIC_KEY" SECRET_VALUE="$DATABASE_URL" python3 - <<'PY'
-import base64, os
-from nacl import encoding, public
-
-pk = public.PublicKey(os.environ["PUBLIC_KEY"], encoding.Base64Encoder())
-sealed_box = public.SealedBox(pk)
-encrypted = sealed_box.encrypt(os.environ["SECRET_VALUE"].encode("utf-8"))
-print(base64.b64encode(encrypted).decode("utf-8"))
-PY
-)"
-
-          curl -sS -X PUT \
-            -H "Authorization: Bearer ${GH_ADMIN_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${OWNER}/${REPO}/actions/secrets/DATABASE_URL" \
-            -d "$(jq -n --arg key_id "$KEY_ID" --arg encrypted_value "$ENCRYPTED_VALUE" '{key_id:$key_id, encrypted_value:$encrypted_value}')"
+          # Writes/updates the secret in the target repo.
+          echo -n "${DATABASE_URL}" | gh secret set DATABASE_URL -R "${TARGET_REPO}" -b -
