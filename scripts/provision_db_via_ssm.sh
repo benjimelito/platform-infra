@@ -51,10 +51,12 @@ REMOTE_CMD="${REMOTE_CMD//'${DB_NAME}'/${DB_NAME}}"
 REMOTE_CMD="${REMOTE_CMD//'${DB_USER}'/${DB_USER}}"
 REMOTE_CMD="${REMOTE_CMD//'${DB_PASS}'/${DB_PASS}}"
 
+PARAMS_JSON="$(jq -n --arg cmd "$REMOTE_CMD" '{commands:[$cmd]}')"
+
 COMMAND_ID="$(aws ssm send-command \
   --instance-ids "${INSTANCE_ID}" \
   --document-name "AWS-RunShellScript" \
-  --parameters commands="$(jq -n --arg cmd "$REMOTE_CMD" '{commands:[$cmd]}')" \
+  --parameters "$PARAMS_JSON" \
   --query "Command.CommandId" \
   --output text)"
 
