@@ -3,6 +3,10 @@ name: Provision Lovable App (prod)
 on:
   workflow_dispatch:
     inputs:
+      eb_env_name:
+        description: "Elastic Beanstalk environment name (e.g. mean-crud-api-env). If empty, defaults to <app_slug>-prod"
+        required: false
+        type: string
       target_repo:
         description: "Target repo in owner/name format (e.g. benjimelito/angular-demo)"
         required: true
@@ -46,7 +50,11 @@ jobs:
             APP_SLUG="$(echo "$REPO_NAME" | tr '[:upper:]' '[:lower:]' | tr '-' '_')"
           fi
 
-          EB_ENV_NAME="${APP_SLUG}-prod"
+          if [ -n "${{ inputs.eb_env_name }}" ]; then
+            EB_ENV_NAME="${{ inputs.eb_env_name }}"
+          else
+            EB_ENV_NAME="${APP_SLUG}-prod"
+          fi
 
           echo "TARGET_REPO=$TARGET_REPO" >> "$GITHUB_ENV"
           echo "APP_SLUG=$APP_SLUG" >> "$GITHUB_ENV"
