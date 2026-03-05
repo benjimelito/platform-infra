@@ -35,6 +35,7 @@ jobs:
           pip3 install pynacl
 
       - name: Derive app_slug and EB env name
+        shell: bash
         run: |
           set -euo pipefail
           TARGET_REPO="${{ inputs.target_repo }}"
@@ -48,11 +49,12 @@ jobs:
 
           EB_ENV_NAME="${APP_SLUG}-prod"
 
-          echo "TARGET_REPO=$TARGET_REPO" >> $GITHUB_ENV
-          echo "APP_SLUG=$APP_SLUG" >> $GITHUB_ENV
-          echo "EB_ENV_NAME=$EB_ENV_NAME" >> $GITHUB_ENV
+          echo "TARGET_REPO=$TARGET_REPO" >> "$GITHUB_ENV"
+          echo "APP_SLUG=$APP_SLUG" >> "$GITHUB_ENV"
+          echo "EB_ENV_NAME=$EB_ENV_NAME" >> "$GITHUB_ENV"
 
       - name: Find EB EC2 instance id
+        shell: bash
         run: |
           set -euo pipefail
           ENV_RES_JSON="$(aws elasticbeanstalk describe-environment-resources --environment-name "${EB_ENV_NAME}")"
@@ -61,10 +63,11 @@ jobs:
             echo "ERROR: Could not find an EC2 instance for EB env: ${EB_ENV_NAME}"
             exit 1
           fi
-          echo "INSTANCE_ID=$INSTANCE_ID" >> $GITHUB_ENV
+          echo "INSTANCE_ID=$INSTANCE_ID" >> "$GITHUB_ENV"
 
-      - name: Provision DB via SSM
+      - name: Provision DB via SSM (script)
         id: db
+        shell: bash
         env:
           INSTANCE_ID: ${{ env.INSTANCE_ID }}
           APP_SLUG: ${{ env.APP_SLUG }}
@@ -73,15 +76,23 @@ jobs:
           RDS_ADMIN_PASSWORD: ${{ secrets.RDS_ADMIN_PASSWORD }}
         run: |
           set -euo pipefail
+          chmod +x ./scripts/provision_db_via_ssm.sh
           DATABASE_URL="$(./scripts/provision_db_via_ssm.sh)"
           echo "::add-mask::${DATABASE_URL}"
-          echo "DATABASE_URL=$DATABASE_URL" >> $GITHUB_ENV
+          echo "DATABASE_URL=${DATABASE_URL}" >> "$GITHUB_ENV"
 
       - name: Write DATABASE_URL secret to target repo
+        shell: bash
         env:
           GH_ADMIN_TOKEN: ${{ secrets.GH_ADMIN_TOKEN }}
         run: |
           set -euo pipefail
+
+          if [ -z "${GH_ADMIN_TOKEN}" ]; then
+            echo "ERROR: Missing GH_ADMIN_TOKEN secret in platform-infra repo."
+            exit 1
+          fi
+
           OWNER="${TARGET_REPO%/*}"
           REPO="${TARGET_REPO#*/}"
 
@@ -92,9 +103,16 @@ jobs:
           KEY_ID="$(echo "$KEY_JSON" | jq -r .key_id)"
           PUBLIC_KEY="$(echo "$KEY_JSON" | jq -r .key)"
 
+          if [ -z "$KEY_ID" ] || [ "$KEY_ID" = "null" ] || [ -z "$PUBLIC_KEY" ] || [ "$PUBLIC_KEY" = "null" ]; then
+            echo "ERROR: Could not fetch public key for repo secrets. Check GH_ADMIN_TOKEN permissions."
+            echo "$KEY_JSON"
+            exit 1
+          fi
+
           ENCRYPTED_VALUE="$(PUBLIC_KEY="$PUBLIC_KEY" SECRET_VALUE="$DATABASE_URL" python3 - <<'PY'
 import base64, os
 from nacl import encoding, public
+
 pk = public.PublicKey(os.environ["PUBLIC_KEY"], encoding.Base64Encoder())
 sealed_box = public.SealedBox(pk)
 encrypted = sealed_box.encrypt(os.environ["SECRET_VALUE"].encode("utf-8"))
